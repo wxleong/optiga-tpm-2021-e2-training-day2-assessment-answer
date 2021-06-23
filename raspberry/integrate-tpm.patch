@@ -1,0 +1,83 @@
+From ba6d2637a748688a1235bdc94f5b06e12d70c46a Mon Sep 17 00:00:00 2001
+From: "wenxin.leong" <wenxin.leong@infineon.com>
+Date: Tue, 22 Jun 2021 21:39:52 -0700
+Subject: [PATCH] integrate tpm
+
+---
+ platform/posix/transport/src/openssl_posix.c | 49 ++++++++++++++++++++
+ 1 file changed, 49 insertions(+)
+
+diff --git a/platform/posix/transport/src/openssl_posix.c b/platform/posix/transport/src/openssl_posix.c
+index 28570baf..c7c12338 100644
+--- a/platform/posix/transport/src/openssl_posix.c
++++ b/platform/posix/transport/src/openssl_posix.c
+@@ -32,6 +32,7 @@
+ 
+ #include "openssl_posix.h"
+ #include <openssl/err.h>
++#include <openssl/engine.h>
+ 
+ /*-----------------------------------------------------------*/
+ 
+@@ -418,10 +419,58 @@ static int32_t setPrivateKey( SSL_CTX * pSslContext,
+         logPath( pPrivateKeyPath, CLIENT_KEY_LABEL );
+     #endif
+ 
++#if 1
++    /* Set TPM-based key */
++    {
++        const char  *pEngineName = "tpm2tss";
++        ENGINE  *pEngine = NULL;
++        UI_METHOD *pUiMethod = NULL;
++        EVP_PKEY *pKey = NULL;
++
++        /* Load TPM OpenSSL engine. */
++        ENGINE_load_builtin_engines();
++        pEngine = ENGINE_by_id(pEngineName);
++
++        if (!pEngine)
++        {
++            perror("Unable to load TPM OpenSSL engine.");
++            exit(EXIT_FAILURE);
++        }
++
++        if (!ENGINE_init(pEngine))
++        {
++            perror("Unable to init TPM2 Engine.");
++            exit(EXIT_FAILURE);
++        }
++
++        if (!ENGINE_set_default(pEngine, ENGINE_METHOD_ALL))
++        {
++            perror("Unable to set TPM2 Engine.");
++            exit(EXIT_FAILURE);
++        }
++
++        if (!ENGINE_ctrl(pEngine, ENGINE_CMD_BASE + 1, 0, "mssim:host=localhost,port=2321", NULL))
++        {
++            perror("Unable to switch to TPM simulator mode.");
++            exit(EXIT_FAILURE);
++        }
++
++        pUiMethod = UI_OpenSSL();
++        if (!pUiMethod)
++        {
++            perror("Unable to get OpenSSL UI method.");
++            exit(EXIT_FAILURE);
++        }
++
++        pKey = ENGINE_load_private_key(pEngine, "0x81000001", pUiMethod, NULL);
++        sslStatus = SSL_CTX_use_PrivateKey(pSslContext, pKey);
++    }
++#else
+     /* Import the client certificate private key. */
+     sslStatus = SSL_CTX_use_PrivateKey_file( pSslContext,
+                                              pPrivateKeyPath,
+                                              SSL_FILETYPE_PEM );
++#endif
+ 
+     if( sslStatus != 1 )
+     {
+-- 
+2.17.1
+

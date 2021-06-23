@@ -1,0 +1,185 @@
+From 90c4ace70cf7c2fae62fb2152781368e312ed130 Mon Sep 17 00:00:00 2001
+From: "wenxin.leong" <wenxin.leong@infineon.com>
+Date: Tue, 13 Jul 2021 13:13:39 +0800
+Subject: [PATCH] disable tpm platform hierarchy
+
+---
+ .../mqtt/mqtt_demo_mutual_auth/CMakeLists.txt |   3 +
+ .../mqtt_demo_mutual_auth.c                   | 140 ++++++++++++++++++
+ 2 files changed, 143 insertions(+)
+
+diff --git a/demos/mqtt/mqtt_demo_mutual_auth/CMakeLists.txt b/demos/mqtt/mqtt_demo_mutual_auth/CMakeLists.txt
+index a500d0c8..62565de8 100644
+--- a/demos/mqtt/mqtt_demo_mutual_auth/CMakeLists.txt
++++ b/demos/mqtt/mqtt_demo_mutual_auth/CMakeLists.txt
+@@ -20,6 +20,9 @@ target_link_libraries(
+     PRIVATE
+         clock_posix
+         openssl_posix
++        tss2-tctildr
++        tss2-esys
++        tss2-rc
+ )
+ 
+ target_include_directories(
+diff --git a/demos/mqtt/mqtt_demo_mutual_auth/mqtt_demo_mutual_auth.c b/demos/mqtt/mqtt_demo_mutual_auth/mqtt_demo_mutual_auth.c
+index 960291af..fcc8018b 100644
+--- a/demos/mqtt/mqtt_demo_mutual_auth/mqtt_demo_mutual_auth.c
++++ b/demos/mqtt/mqtt_demo_mutual_auth/mqtt_demo_mutual_auth.c
+@@ -75,6 +75,123 @@
+ /* Clock for timer. */
+ #include "clock.h"
+ 
++#include <tss2/tss2_tpm2_types.h>
++#include <tss2/tss2_rc.h>
++#include <tss2/tss2_mu.h>
++#include <tss2/tss2_esys.h>
++#include <tss2/tss2_tctildr.h>
++
++#define TCTI_NAME_CONF "mssim:host=localhost,port=2321"
++
++TSS2_RC
++esys_ctx_init(ESYS_CONTEXT **esys_ctx)
++{
++
++    TSS2_RC rc;
++    if (!esys_ctx) {
++        rc = TSS2_BASE_RC_BAD_REFERENCE;
++    } else {
++        TSS2_TCTI_CONTEXT *tcti_ctx = NULL;
++        rc = Tss2_TctiLdr_Initialize(TCTI_NAME_CONF, &tcti_ctx);
++        if (TSS2_RC_SUCCESS != rc) {
++        } else {
++            rc = Esys_Initialize(esys_ctx, tcti_ctx, NULL);
++            if (TSS2_RC_SUCCESS != rc) {
++                Tss2_TctiLdr_Finalize(&tcti_ctx);
++            }
++        }
++    }
++    return rc;
++}
++
++TSS2_RC
++esys_ctx_free(ESYS_CONTEXT **esys_ctx)
++{
++    TSS2_RC rc;
++    if ((!esys_ctx) || (!*esys_ctx)) {
++        rc = TSS2_BASE_RC_BAD_REFERENCE;
++    } else {
++        TSS2_TCTI_CONTEXT *tcti_ctx;
++        rc = Esys_GetTcti(*esys_ctx, &tcti_ctx);
++        Esys_Finalize(esys_ctx);
++        if (TSS2_RC_SUCCESS != rc) {
++        } else {
++            Tss2_TctiLdr_Finalize(&tcti_ctx);
++        }
++    }
++    return rc;
++}
++
++int
++tpm2_get32ByteRandom(ESYS_CONTEXT *ectx, unsigned char *buffer)
++{
++    TSS2_RC rc;
++
++    TPM2B_DIGEST *b;
++    rc = Esys_GetRandom(ectx,
++                        ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
++                        32, &b);
++    if (rc != TSS2_RC_SUCCESS) {
++        printf("Esys_GetRandom failed with error code: 0x%x (%s).\n", rc, Tss2_RC_Decode(rc));
++        free(b);
++        return 1;
++    } else {
++        memcpy(buffer, b->buffer, 32);
++        free(b);
++    }
++
++    return 0;
++}
++
++int
++tpm2_randomizePlatformAuth(ESYS_CONTEXT *ectx) 
++{
++    TSS2_RC rc;
++    TPM2B_DIGEST auth;
++    unsigned char buffer[32] = {0};
++    
++    if (tpm2_get32ByteRandom(ectx, buffer))
++        return 1;
++
++    auth.size = 32;
++    memcpy(auth.buffer, buffer, 32);
++
++    rc = Esys_HierarchyChangeAuth(ectx, ESYS_TR_RH_PLATFORM, ESYS_TR_PASSWORD,
++            ESYS_TR_NONE, ESYS_TR_NONE, &auth);
++
++    if (rc != TPM2_RC_SUCCESS) {
++        printf("Platform Esys_HierarchyChangeAuth failed with error code: 0x%x (%s).\n", rc, Tss2_RC_Decode(rc));
++        return 1;
++    }
++
++    return 0;
++}
++
++int
++tpm2_disablePlatform(ESYS_CONTEXT *ectx) 
++{
++    TSS2_RC rc;
++    ESYS_TR authHandle_handle = ESYS_TR_RH_PLATFORM;
++    TPMI_RH_ENABLES target = ESYS_TR_RH_PLATFORM;
++    TPMI_YES_NO toEnable = TPM2_NO;
++
++    rc = Esys_HierarchyControl(
++        ectx,
++        authHandle_handle,
++        ESYS_TR_PASSWORD,
++        ESYS_TR_NONE,
++        ESYS_TR_NONE,
++        target,
++        toEnable);
++
++    if (rc != TPM2_RC_SUCCESS) {
++        printf("Esys_HierarchyControl failed with error code: 0x%x (%s).\n", rc, Tss2_RC_Decode(rc));
++        return 1;
++    }
++
++    return 0;
++}
++
+ /**
+  * These configuration settings are required to run the mutual auth demo.
+  * Throw compilation error if the below configs are not defined.
+@@ -1524,6 +1641,29 @@ int main( int argc,
+     ( void ) argc;
+     ( void ) argv;
+ 
++    {
++        ESYS_CONTEXT *ectx = NULL;
++        TSS2_RC rc;
++
++        rc = esys_ctx_init(&ectx);
++        if (rc != TSS2_RC_SUCCESS) {
++            printf("esys_ctx_init failed with error code: 0x%x (%s)\n", rc, Tss2_RC_Decode(rc));
++            return 1;
++        }
++
++        if (tpm2_randomizePlatformAuth(ectx))
++            return 1;
++
++        if (tpm2_disablePlatform(ectx))
++            return 1;
++
++        rc = esys_ctx_free(&ectx);
++        if (rc != TSS2_RC_SUCCESS) {
++            printf("esys_ctx_free failed with error code: 0x%x (%s).\n", rc, Tss2_RC_Decode(rc));
++            return 1;
++        }
++    }
++
+     /* Set the pParams member of the network context with desired transport. */
+     networkContext.pParams = &opensslParams;
+ 
+-- 
+2.19.1.windows.1
+
